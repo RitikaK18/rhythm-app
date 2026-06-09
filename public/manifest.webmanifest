@@ -1,0 +1,9 @@
+{
+  "name": "Rhythm — Health Log",
+  "short_name": "Rhythm",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F4EFE6",
+  "theme_color": "#F4EFE6",
+  "description": "Daily cycle, training, and nutrition tracker."
+}
