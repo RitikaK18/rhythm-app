@@ -707,16 +707,26 @@ export default function App() {
   const lastDate = useRef(null);
 
   // Initial load: show local cache instantly, then refresh from the Sheet.
+  // IMPORTANT: merge sheet + local (local wins for any day) so a Sheet that is
+  // briefly behind can never wipe data logged on this device, then push up any
+  // days that exist only locally.
   useEffect(() => {
-    setData(loadLocal());
+    const local = loadLocal();
+    setData(local);
     (async () => {
       if (sheetUrl) {
         try {
           setSync("syncing");
-          const entries = await pullSheet(sheetUrl, sheetToken);
-          const merged = { entries };
+          const sheetEntries = await pullSheet(sheetUrl, sheetToken);
+          const localEntries = (local && local.entries) || {};
+          const merged = { entries: { ...sheetEntries, ...localEntries } };
           setData(merged);
           saveLocal(merged);
+          const toPush = Object.keys(localEntries).filter((d) => !(d in sheetEntries));
+          for (const d of toPush) {
+            const cd = cycleDayFor(d, merged.entries);
+            await pushRow(sheetUrl, sheetToken, entryToRow(d, merged.entries[d], cd.cycleDay, cd.phase));
+          }
           setSync("ok");
         } catch (e) { setSync("error"); }
       } else {
@@ -726,6 +736,26 @@ export default function App() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Flush a pending Sheet write immediately when the app is backgrounded or
+  // closed — iOS kills home-screen PWAs instantly, which would otherwise drop
+  // the debounced push. sendBeacon survives the page being torn down.
+  useEffect(() => {
+    const flush = () => {
+      if (document.visibilityState !== "hidden") return;
+      if (!sheetUrl || !lastDate.current) return;
+      const d = lastDate.current;
+      const cd = cycleDayFor(d, data.entries);
+      const row = entryToRow(d, data.entries[d] || {}, cd.cycleDay, cd.phase);
+      try {
+        const blob = new Blob([JSON.stringify({ token: sheetToken || "", row })],
+          { type: "text/plain;charset=utf-8" });
+        navigator.sendBeacon(sheetUrl, blob);
+      } catch { /* ignore */ }
+    };
+    document.addEventListener("visibilitychange", flush);
+    return () => document.removeEventListener("visibilitychange", flush);
+  }, [data, sheetUrl, sheetToken]);
 
   // Persist locally on every change, and push the edited day to the Sheet (debounced).
   useEffect(() => {
@@ -741,7 +771,7 @@ export default function App() {
         await pushRow(sheetUrl, sheetToken, entryToRow(d, data.entries[d] || {}, cd.cycleDay, cd.phase));
         setSync("ok");
       } catch (e) { setSync("error"); }
-    }, 900);
+    }, 400);
   }, [data, loading, sheetUrl, sheetToken]);
 
   // Pull from the Sheet and merge (local edits win for overlapping days, then seed new days up).
