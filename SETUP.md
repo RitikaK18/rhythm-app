@@ -1,76 +1,52 @@
 # Rhythm — setup guide
 
-A daily cycle / training / nutrition tracker. Your data lives in **your own Google Sheet**;
-the app reads and writes it through a tiny Google Apps Script, and keeps an offline copy in
-your browser so it loads instantly and still works without signal.
+A daily cycle / training / nutrition tracker. Your data lives in **Supabase**
+(a hosted Postgres database). Each person signs in with their own email and
+password, and the database keeps every account's data completely private — you
+only ever see your own. The app also keeps an offline copy in your browser so it
+loads instantly and works without signal, then syncs when you're back online.
 
-There are two things to set up:
-- **A. The Google Sheet backend** (~10 min, one time)
-- **B. Hosting the app** on Vercel (~5–10 min, one time)
-
-You can do them in either order, but the app needs the Sheet URL at the end.
+The app is already wired to a Supabase project (see `src/supabase.js`). For
+day-to-day use there's nothing to configure — just open the hosted app and sign
+up. The sections below cover hosting and the one-time Supabase settings.
 
 ---
 
-## A. Google Sheet backend
+## A. Use the app
 
-1. **Make a Sheet.** Go to https://sheets.google.com and create a blank spreadsheet.
-   Name it anything (e.g. "Rhythm"). Don't add headers — the script does that for you.
+1. Open the deployed URL (see section B).
+2. Tap **Create an account** — any email + a password (6+ characters).
+3. Start logging. Everything saves to your account and syncs to every device you
+   sign in on.
 
-2. **Open the script editor.** In the Sheet: **Extensions → Apps Script**.
+To add another person (e.g. a family member): they open the **same URL** and
+create **their own** account. Their data is isolated from yours automatically.
 
-3. **Paste the code.** Delete whatever's in the editor, then open
-   `google-apps-script/Code.gs` from this project, copy ALL of it, paste it in, and click
-   the **Save** icon (💾).
+### Add to Home Screen (feels like a native app)
+- **iPhone (Safari):** Share button → Add to Home Screen.
+- **Android (Chrome):** ⋮ menu → Add to Home screen / Install app.
 
-4. **Deploy as a Web App.** Click **Deploy → New deployment**.
-   - Click the gear next to "Select type" → choose **Web app**.
-   - **Execute as:** Me
-   - **Who has access:** Anyone
-   - Click **Deploy**.
-
-5. **Authorize.** Google will ask for permission.
-   - Click **Authorize access**, pick your account.
-   - You'll likely see "Google hasn't verified this app." That's expected for your own
-     script. Click **Advanced → Go to (your project name) → Allow.**
-
-6. **Copy the URL.** After deploying you'll get a **Web app URL** ending in `/exec`.
-   Copy it — you'll paste it into the app in step B7. (You can find it again anytime via
-   **Deploy → Manage deployments**.)
-
-   > Optional privacy step: anyone with this URL can read/write the Sheet. To lock it down,
-   > set `var TOKEN = 'some-secret';` near the top of `Code.gs`, redeploy, and enter the same
-   > secret in the app's settings.
+> After deploying a new version, delete the old home-screen icon and re-add it
+> so the phone loads the latest build instead of a cached one.
 
 ---
 
 ## B. Host the app on Vercel
 
-You need the project on the web. The no-terminal route is easiest.
-
 ### Option 1 — GitHub + Vercel (no terminal)
-1. Create a free account at https://github.com and https://vercel.com (you can log in to
-   Vercel with GitHub).
-2. On GitHub, create a new repository (e.g. `rhythm-app`).
-3. Upload this whole folder to the repo (**Add file → Upload files**, drag everything in
-   — but **not** the `node_modules` or `dist` folders if present).
-4. In Vercel: **Add New → Project → Import** your `rhythm-app` repo.
-5. Vercel auto-detects Vite. Leave the defaults and click **Deploy**.
-6. After ~1 minute you get a live URL like `https://rhythm-app-xxxx.vercel.app`.
-7. Open it, tap the **gear icon** (top right), paste your Web App URL (and token if you set
-   one), and tap **Save & sync**. Done — the dot turns green ("Synced").
+1. Push this folder to a GitHub repo (don't commit `node_modules` or `dist`).
+2. In Vercel: **Add New → Project → Import** your repo.
+3. Vercel auto-detects Vite. Leave the defaults and click **Deploy**.
+4. After ~1 minute you get a live URL like `https://rhythm-app-xxxx.vercel.app`.
 
 ### Option 2 — Command line
 ```bash
-# one-time: install Node.js from https://nodejs.org, then:
 npm i -g vercel
-
 cd rhythm-app
 npm install
 npm run build      # optional local check
 vercel             # follow the prompts; accept defaults
 ```
-Then open the URL it prints and do step B7 above.
 
 ### Run it locally first (optional)
 ```bash
@@ -81,30 +57,36 @@ npm run dev        # opens http://localhost:5173
 
 ---
 
-## C. Make it feel like an app
-On your phone, open the deployed URL and **Add to Home Screen**:
-- **iPhone (Safari):** Share button → Add to Home Screen.
-- **Android (Chrome):** ⋮ menu → Add to Home screen / Install app.
+## C. Supabase backend (already set up)
 
-It'll open full-screen with its own icon.
+The database table and security are already created. For reference, the setup was:
+
+- **Table `entries`**: `(user_id, date, payload jsonb, updated_at)`, primary key
+  `(user_id, date)`. The whole day's log is stored in `payload`.
+- **Row Level Security** is enabled with policies so each user can only read and
+  write rows where `user_id = auth.uid()`. The publishable key shipped in the
+  app can therefore only ever touch the signed-in user's own data.
+
+### Auth settings (in the Supabase dashboard)
+- **Authentication → Sign In / Providers → Email**: the "Confirm email" toggle
+  controls whether new users must click an email link before signing in. Turn it
+  **off** for instant signup, **on** for stronger verification.
+
+### Where to see your data
+- **Table Editor → `entries`** — one row per logged day (schema must be `public`).
+- **Authentication → Users** — the accounts that have signed up.
 
 ---
 
 ## How the data flows
-- Every day you log is saved to your browser instantly **and** pushed to the Sheet (one row
-  per date — editing a day updates its existing row).
-- On open, the app pulls the latest from the Sheet so any device stays current.
-- No Sheet connected? It still works fully, just stored on that device only. The gear menu
-  also has a **Download CSV** button anytime.
-
-## The Sheet columns
-`Date, Flow, Energy, Mood, Sleep, Worked out, Mode, Class, Self types, Duration, New high,
-Treat, Cravings, Caffeine, Caffeine servings, Alcohol, Drinks, Symptoms, Cycle day, Phase, Notes`
-
-You can chart or pivot this however you like in Sheets — just don't rename column headers or
-the "Log" tab, since the app matches on those.
+- Every day you log is saved to your browser instantly **and** upserted to
+  Supabase (one row per date — editing a day updates its existing row).
+- On open, the app pulls your rows from Supabase and merges them with the local
+  cache (local edits win), so data is never lost or clobbered.
+- Offline? It still works fully from the local cache and syncs next time you're
+  online. The gear menu also has a **Download CSV** button anytime.
 
 ## Note
-Cycle phase and next-period estimates are based on the days you log and assume a roughly
-typical cycle. They're for spotting your own patterns — not medical advice, and not a
-contraception method.
+Cycle phase and next-period estimates are based on the days you log and assume a
+roughly typical cycle. They're for spotting your own patterns — not medical
+advice, and not a contraception method.
