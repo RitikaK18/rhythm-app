@@ -43,14 +43,22 @@ const CRAVINGS = ["Sugar", "Salt", "Carbs", "Chocolate"];
 const SYMPTOMS = ["Cramps", "Bloating", "Headache", "Fatigue", "Tender breasts", "Backache", "Nausea", "Acne", "Low mood", "Anxiety", "Poor sleep"];
 
 /* ------------------------------ cycle logic ------------------------------ */
+const PERIOD_GAP = 3; // a new period needs at least this many bleed-free days before it
 function getPeriodStarts(entries) {
   const dates = Object.keys(entries).sort();
   const starts = [];
   for (const d of dates) {
     const e = entries[d];
     if (e && BLEED.includes(e.flow)) {
-      const prev = entries[addDays(d, -1)];
-      if (!prev || !BLEED.includes(prev.flow)) starts.push(d);
+      // A real new period only starts when there's been no actual bleeding for a
+      // few days. This way a single spotting (or skipped) day in the middle of a
+      // period doesn't get misread as the start of a brand-new cycle.
+      let recentBleed = false;
+      for (let k = 1; k <= PERIOD_GAP; k++) {
+        const prev = entries[addDays(d, -k)];
+        if (prev && BLEED.includes(prev.flow)) { recentBleed = true; break; }
+      }
+      if (!recentBleed) starts.push(d);
     }
   }
   return starts;
@@ -67,8 +75,10 @@ function avgPeriodLen(entries, starts) {
   if (!starts.length) return 5;
   const lens = [];
   for (const s of starts) {
+    // Count consecutive period days, treating spotting as part of the period so
+    // a spotting day in the middle/tail doesn't cut the length short.
     let len = 0, d = s;
-    while (entries[d] && BLEED.includes(entries[d].flow)) { len++; d = addDays(d, 1); }
+    while (entries[d] && (BLEED.includes(entries[d].flow) || entries[d].flow === "spotting")) { len++; d = addDays(d, 1); }
     if (len > 0) lens.push(len);
   }
   if (!lens.length) return 5;
