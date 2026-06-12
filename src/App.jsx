@@ -6,8 +6,9 @@ import {
 import {
   Dumbbell, Cookie, Moon, Battery, Smile, Droplet, ChevronLeft,
   ChevronRight, CalendarDays, Activity, NotebookPen, Check, Coffee, Wine,
-  Settings, Download,
+  Settings, Download, LogOut,
 } from "lucide-react";
+import { supabase } from "./supabase";
 
 /* ----------------------------- date helpers ----------------------------- */
 const ymd = (d) => d.toLocaleDateString("en-CA");
@@ -92,16 +93,17 @@ function entryPhase(date, starts, cycleLen, periodLen) {
 
 /* --------------------------- storage + sync ----------------------------- */
 const LS_KEY = "rhythm-data-v1";
-const URL_KEY = "rhythm-sheet-url";
-const TOKEN_KEY = "rhythm-sheet-token";
 const COLUMNS = ["Date", "Flow", "Energy", "Mood", "Sleep", "Worked out", "Mode", "Class", "Self types", "Duration", "New high", "Treat", "Cravings", "Caffeine", "Caffeine servings", "Alcohol", "Drinks", "Symptoms", "Cycle day", "Phase", "Notes"];
 
-function loadLocal() {
-  try { const r = localStorage.getItem(LS_KEY); return r ? JSON.parse(r) : { entries: {} }; }
+// Local cache is namespaced per user so two people on the same device/browser
+// never see each other's data.
+const localKey = (userId) => LS_KEY + (userId ? ":" + userId : "");
+function loadLocal(userId) {
+  try { const r = localStorage.getItem(localKey(userId)); return r ? JSON.parse(r) : { entries: {} }; }
   catch { return { entries: {} }; }
 }
-function saveLocal(data) {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch { /* quota / private mode */ }
+function saveLocal(userId, data) {
+  try { localStorage.setItem(localKey(userId), JSON.stringify(data)); } catch { /* quota / private mode */ }
 }
 
 function cycleDayFor(date, entries) {
@@ -142,49 +144,24 @@ function entryToRow(date, e, cycleDay, phase) {
   };
 }
 
-const numv = (v) => { const n = Number(v); return (v === "" || v == null || isNaN(n)) ? undefined : n; };
-const listv = (v) => (v ? String(v).split(/;\s*/).map((x) => x.trim()).filter(Boolean) : undefined);
-const yesv = (v) => (String(v).toLowerCase() === "yes" || v === true) ? true : undefined;
-
-function rowToEntry(row) {
-  const date = String(row["Date"] || "").trim();
-  if (!date) return null;
-  const e = { date };
-  if (row["Flow"]) e.flow = String(row["Flow"]).trim();
-  if (numv(row["Energy"])) e.energy = numv(row["Energy"]);
-  if (numv(row["Mood"])) e.mood = numv(row["Mood"]);
-  if (numv(row["Sleep"])) e.sleep = numv(row["Sleep"]);
-  if (yesv(row["Worked out"])) e.didWorkout = true;
-  if (row["Mode"]) e.workoutMode = String(row["Mode"]).trim();
-  if (row["Class"]) e.workoutClass = String(row["Class"]).trim();
-  if (listv(row["Self types"])) e.workoutSelf = listv(row["Self types"]);
-  if (numv(row["Duration"])) e.workoutDuration = numv(row["Duration"]);
-  if (row["New high"]) e.prNote = String(row["New high"]);
-  if (yesv(row["Treat"])) e.treat = true;
-  if (listv(row["Cravings"])) e.cravings = listv(row["Cravings"]);
-  if (yesv(row["Caffeine"])) e.caffeine = true;
-  if (numv(row["Caffeine servings"])) e.caffeineAmt = numv(row["Caffeine servings"]);
-  if (yesv(row["Alcohol"])) e.alcohol = true;
-  if (numv(row["Drinks"])) e.alcoholAmt = numv(row["Drinks"]);
-  if (listv(row["Symptoms"])) e.symptoms = listv(row["Symptoms"]);
-  if (row["Notes"]) e.notes = String(row["Notes"]);
-  return e;
-}
-
-async function pullSheet(url, token) {
-  const u = url + (url.includes("?") ? "&" : "?") + "action=read" + (token ? "&token=" + encodeURIComponent(token) : "");
-  const res = await fetch(u, { method: "GET" });
-  const json = await res.json();
+// Pull every entry belonging to the signed-in user. RLS guarantees we only ever
+// get this user's own rows. The full entry object is stored in `payload`.
+async function pullAll() {
+  const { data, error } = await supabase.from("entries").select("date,payload");
+  if (error) throw error;
   const entries = {};
-  (json.rows || []).forEach((row) => { const e = rowToEntry(row); if (e) entries[e.date] = e; });
+  (data || []).forEach((r) => { entries[r.date] = { ...(r.payload || {}), date: r.date }; });
   return entries;
 }
-async function pushRow(url, token, row) {
-  await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=utf-8" }, // simple request -> no CORS preflight
-    body: JSON.stringify({ token: token || "", row }),
-  });
+// Upsert a single day. user_id is filled server-side from auth.uid() (table
+// default), so we never send it from the client.
+async function pushEntry(date, entry) {
+  const payload = { ...entry };
+  delete payload.date;
+  const { error } = await supabase
+    .from("entries")
+    .upsert({ date, payload, updated_at: new Date().toISOString() }, { onConflict: "user_id,date" });
+  if (error) throw error;
 }
 
 /* ----------------------------- small UI bits ----------------------------- */
@@ -662,23 +639,17 @@ function SyncDot({ sync }) {
   return <span className="sync-dot"><i style={{ background: color }} />{label}</span>;
 }
 
-function SettingsPanel({ sheetUrl, sheetToken, onSave, sync, onSyncNow, onExport }) {
-  const [url, setUrl] = useState(sheetUrl);
-  const [token, setToken] = useState(sheetToken);
+function SettingsPanel({ email, sync, onSyncNow, onExport, onSignOut }) {
   return (
     <div className="panel">
       <div className="card">
-        <div className="card-head"><Settings size={17} /><span>Google Sheet sync</span></div>
+        <div className="card-head"><Settings size={17} /><span>Account</span></div>
         <p className="settings-help">
-          Paste the Web App URL from your Apps Script deployment (steps in SETUP.md). Leave blank to keep data on this device only.
+          Signed in as <strong>{email}</strong>. Your log syncs privately to your account, so it stays current on every device you sign in on.
         </p>
-        <input className="pr-input" style={{ marginTop: 0 }} placeholder="https://script.google.com/macros/s/…/exec"
-          value={url} onChange={(e) => setUrl(e.target.value)} />
-        <input className="pr-input" placeholder="Secret token (optional — must match the script)"
-          value={token} onChange={(e) => setToken(e.target.value)} />
         <div className="settings-actions">
-          <button className="btn-primary" onClick={() => onSave(url.trim(), token.trim())}>Save &amp; sync</button>
-          <button className="btn-ghost" onClick={() => onSyncNow(sheetUrl, sheetToken)}>Sync now</button>
+          <button className="btn-primary" onClick={onSyncNow}>Sync now</button>
+          <button className="btn-ghost" onClick={onSignOut}><LogOut size={15} style={{ marginRight: 6 }} />Sign out</button>
         </div>
         <div className="settings-status"><SyncDot sync={sync} /></div>
       </div>
@@ -688,116 +659,76 @@ function SettingsPanel({ sheetUrl, sheetToken, onSave, sync, onSyncNow, onExport
         <button className="btn-ghost" onClick={onExport}>Download CSV</button>
       </div>
       <div className="disclaimer">
-        Anyone with your Web App URL can read or write the sheet, so treat it like a password. Setting a secret token in the script (and here) adds a layer of protection.
+        Your entries are protected by per-user row-level security — only you, while signed in, can read or write them. No one else (not even another signed-in user) can see your data.
       </div>
     </div>
   );
 }
 
 /* --------------------------------- app ---------------------------------- */
-export default function App() {
+function Tracker({ session, signOut }) {
+  const userId = session.user.id;
+  const email = session.user.email;
   const [data, setData] = useState({ entries: {} });
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState("today");
   const [date, setDate] = useState(TODAY);
-  const [sheetUrl, setSheetUrl] = useState(() => { try { return localStorage.getItem(URL_KEY) || ""; } catch { return ""; } });
-  const [sheetToken, setSheetToken] = useState(() => { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; } });
   const [sync, setSync] = useState("idle");
   const saveTimer = useRef();
   const lastDate = useRef(null);
 
-  // Initial load: show local cache instantly, then refresh from the Sheet.
-  // IMPORTANT: merge sheet + local (local wins for any day) so a Sheet that is
-  // briefly behind can never wipe data logged on this device, then push up any
-  // days that exist only locally.
+  // Initial load: show this user's local cache instantly, then pull from
+  // Supabase and merge (local wins for any overlapping day so an in-flight edit
+  // can never be clobbered), pushing up any days that exist only locally.
   useEffect(() => {
-    const local = loadLocal();
+    const local = loadLocal(userId);
     setData(local);
     (async () => {
-      if (sheetUrl) {
-        try {
-          setSync("syncing");
-          const sheetEntries = await pullSheet(sheetUrl, sheetToken);
-          const localEntries = (local && local.entries) || {};
-          const merged = { entries: { ...sheetEntries, ...localEntries } };
-          setData(merged);
-          saveLocal(merged);
-          const toPush = Object.keys(localEntries).filter((d) => !(d in sheetEntries));
-          for (const d of toPush) {
-            const cd = cycleDayFor(d, merged.entries);
-            await pushRow(sheetUrl, sheetToken, entryToRow(d, merged.entries[d], cd.cycleDay, cd.phase));
-          }
-          setSync("ok");
-        } catch (e) { setSync("error"); }
-      } else {
-        setSync("local");
-      }
+      try {
+        setSync("syncing");
+        const remote = await pullAll();
+        const localEntries = (local && local.entries) || {};
+        const merged = { entries: { ...remote, ...localEntries } };
+        setData(merged);
+        saveLocal(userId, merged);
+        const toPush = Object.keys(localEntries).filter((d) => !(d in remote));
+        for (const d of toPush) await pushEntry(d, merged.entries[d]);
+        setSync("ok");
+      } catch (e) { setSync("error"); }
       setLoading(false);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [userId]);
 
-  // Flush a pending Sheet write immediately when the app is backgrounded or
-  // closed — iOS kills home-screen PWAs instantly, which would otherwise drop
-  // the debounced push. sendBeacon survives the page being torn down.
-  useEffect(() => {
-    const flush = () => {
-      if (document.visibilityState !== "hidden") return;
-      if (!sheetUrl || !lastDate.current) return;
-      const d = lastDate.current;
-      const cd = cycleDayFor(d, data.entries);
-      const row = entryToRow(d, data.entries[d] || {}, cd.cycleDay, cd.phase);
-      try {
-        const blob = new Blob([JSON.stringify({ token: sheetToken || "", row })],
-          { type: "text/plain;charset=utf-8" });
-        navigator.sendBeacon(sheetUrl, blob);
-      } catch { /* ignore */ }
-    };
-    document.addEventListener("visibilitychange", flush);
-    return () => document.removeEventListener("visibilitychange", flush);
-  }, [data, sheetUrl, sheetToken]);
-
-  // Persist locally on every change, and push the edited day to the Sheet (debounced).
+  // Persist locally on every change, and push the edited day to Supabase (debounced).
   useEffect(() => {
     if (loading) return;
-    saveLocal(data);
-    if (!sheetUrl || !lastDate.current) return;
+    saveLocal(userId, data);
+    if (!lastDate.current) return;
     const d = lastDate.current;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
         setSync("syncing");
-        const cd = cycleDayFor(d, data.entries);
-        await pushRow(sheetUrl, sheetToken, entryToRow(d, data.entries[d] || {}, cd.cycleDay, cd.phase));
+        await pushEntry(d, data.entries[d] || {});
         setSync("ok");
       } catch (e) { setSync("error"); }
     }, 400);
-  }, [data, loading, sheetUrl, sheetToken]);
+  }, [data, loading, userId]);
 
-  // Pull from the Sheet and merge (local edits win for overlapping days, then seed new days up).
-  const syncNow = async (url = sheetUrl, token = sheetToken) => {
-    if (!url) { setSync("local"); return; }
+  // Pull from Supabase and merge (local edits win), then seed new local-only days up.
+  const syncNow = async () => {
     try {
       setSync("syncing");
-      const sheetEntries = await pullSheet(url, token);
+      const remote = await pullAll();
       const localEntries = (data && data.entries) || {};
-      const merged = { ...sheetEntries, ...localEntries };
+      const merged = { ...remote, ...localEntries };
       setData({ entries: merged });
-      saveLocal({ entries: merged });
-      const toPush = Object.keys(localEntries).filter((d) => !(d in sheetEntries));
-      for (const d of toPush) {
-        const cd = cycleDayFor(d, merged);
-        await pushRow(url, token, entryToRow(d, merged[d], cd.cycleDay, cd.phase));
-      }
+      saveLocal(userId, { entries: merged });
+      const toPush = Object.keys(localEntries).filter((d) => !(d in remote));
+      for (const d of toPush) await pushEntry(d, merged[d]);
       setSync("ok");
     } catch (e) { setSync("error"); }
-  };
-
-  const saveSettings = (url, token) => {
-    try { localStorage.setItem(URL_KEY, url); localStorage.setItem(TOKEN_KEY, token); } catch { /* ignore */ }
-    setSheetUrl(url);
-    setSheetToken(token);
-    syncNow(url, token);
   };
 
   const exportCsv = () => {
@@ -851,7 +782,7 @@ export default function App() {
           <div className="brand">Rhythm</div>
           <div className="brand-sub">your body, day by day</div>
         </div>
-        <button className="gear" title="Sheet sync & settings"
+        <button className="gear" title="Account & settings"
           onClick={() => setView(view === "settings" ? "today" : "settings")}>
           <SyncDot sync={sync} />
           <Settings size={18} />
@@ -879,11 +810,90 @@ export default function App() {
         <InsightsPanel entries={data.entries} starts={starts} cycleLen={cycleLen} periodLen={periodLen} />
       )}
       {view === "settings" && (
-        <SettingsPanel sheetUrl={sheetUrl} sheetToken={sheetToken} onSave={saveSettings}
-          sync={sync} onSyncNow={syncNow} onExport={exportCsv} />
+        <SettingsPanel email={email} sync={sync} onSyncNow={syncNow} onExport={exportCsv} onSignOut={signOut} />
       )}
-      <div className="footnote">
-        {sheetUrl ? "Synced to your Google Sheet · cached on this device" : "Saved on this device · connect a Sheet in settings"}
+      <div className="footnote">Synced privately to your account · cached on this device</div>
+    </div>
+  );
+}
+
+/* ------------------------------ auth gate ------------------------------- */
+export default function App() {
+  const [session, setSession] = useState(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true); });
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  const signOut = async () => { await supabase.auth.signOut(); };
+
+  if (!ready) return <div className="root"><div className="loading">Loading…</div><style>{css}</style></div>;
+  if (!session) return <Auth />;
+  // Remount Tracker per user so state never leaks between accounts on one device.
+  return <Tracker key={session.user.id} session={session} signOut={signOut} />;
+}
+
+function Auth() {
+  const [mode, setMode] = useState("signin"); // "signin" | "signup"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr(""); setMsg("");
+    try {
+      if (mode === "signup") {
+        const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
+        if (error) throw error;
+        if (!data.session) setMsg("Check your email to confirm your account, then come back and sign in.");
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        if (error) throw error;
+      }
+    } catch (e2) { setErr(e2.message || "Something went wrong."); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="root">
+      <style>{css}</style>
+      <header className="topbar">
+        <div><div className="brand">Rhythm</div><div className="brand-sub">your body, day by day</div></div>
+      </header>
+      <div className="auth-wrap">
+        <div className="card">
+          <div className="card-head"><span>{mode === "signup" ? "Create your account" : "Welcome back"}</span></div>
+          <p className="settings-help">
+            {mode === "signup"
+              ? "Sign up with any email and a password (6+ characters). Your log is private to you and syncs across all your devices."
+              : "Sign in to load your private log on this device."}
+          </p>
+          <form onSubmit={submit}>
+            <input className="pr-input" style={{ marginTop: 0 }} type="email" autoComplete="email"
+              placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+            <input className="pr-input" type="password"
+              autoComplete={mode === "signup" ? "new-password" : "current-password"}
+              placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={6} />
+            <button className="btn-primary" style={{ width: "100%", marginTop: 12 }} disabled={busy}>
+              {busy ? "…" : mode === "signup" ? "Create account" : "Sign in"}
+            </button>
+          </form>
+          {err && <div className="auth-err">{err}</div>}
+          {msg && <div className="auth-msg">{msg}</div>}
+          <button className="textbtn" style={{ marginTop: 14 }}
+            onClick={() => { setMode(mode === "signup" ? "signin" : "signup"); setErr(""); setMsg(""); }}>
+            {mode === "signup" ? "Already have an account? Sign in" : "New here? Create an account"}
+          </button>
+        </div>
+        <div className="disclaimer">
+          Cycle and prediction estimates are for spotting your own patterns — not medical advice, and not a contraception method.
+        </div>
       </div>
     </div>
   );
@@ -903,7 +913,10 @@ const css = `
 .settings-actions { display: flex; gap: 8px; margin-top: 12px; }
 .settings-status { margin-top: 12px; }
 .btn-primary { flex: 1; border: none; background: #C0613F; color: #fff; padding: 12px; border-radius: 11px; font-family: inherit; font-weight: 600; font-size: 14px; cursor: pointer; }
-.btn-ghost { border: 1px solid #DCD2C2; background: #FFFDF9; color: #4A4138; padding: 12px 16px; border-radius: 11px; font-family: inherit; font-weight: 600; font-size: 14px; cursor: pointer; }
+.btn-ghost { border: 1px solid #DCD2C2; background: #FFFDF9; color: #4A4138; padding: 12px 16px; border-radius: 11px; font-family: inherit; font-weight: 600; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.auth-wrap { display: flex; flex-direction: column; gap: 12px; margin-top: 24px; }
+.auth-err { margin-top: 12px; font-size: 13px; color: #fff; background: #C0524A; padding: 10px 12px; border-radius: 10px; }
+.auth-msg { margin-top: 12px; font-size: 13px; color: #3A5A40; background: #E3EEE4; padding: 10px 12px; border-radius: 10px; }
 .brand { font-family: 'Fraunces', serif; font-size: 34px; font-weight: 600; letter-spacing: -0.5px; line-height: 1; }
 .brand-sub { font-style: italic; color: #8A7F72; font-family: 'Fraunces', serif; font-size: 15px; margin-top: 2px; }
 
